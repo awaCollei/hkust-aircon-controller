@@ -4,7 +4,7 @@ import time
 import logging
 import sys
 import os
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, Tuple
 
 from flask import Flask, render_template, request, jsonify
@@ -118,10 +118,18 @@ class SchedulerManager:
         self._jobs: Dict[str, Dict] = {}
         self._current_token: Optional[str] = None
         self._log_callback = None
-        self._loop_count = 0  # 当前循环次数
-        self._max_loops = 0   # 最大循环次数
-        self._task_counter = 0  # 任务计数器
-        self._execution_lock = threading.Lock()  # 执行锁
+        
+        # 循环控制
+        self._loop_count = 0
+        self._max_loops = 0
+        self._on_delay = 0
+        self._off_delay = 0
+        self._is_on = False  # 当前真实状态
+        self._is_waiting = False  # 是否在等待中
+        self._current_action = None  # 当前正在等待的操作: 'on' 或 'off'
+        
+        # 单任务调度（顺序执行）
+        self._scheduled_job = None
         
         logger.info("调度器管理器初始化完成")
     
@@ -158,6 +166,10 @@ class SchedulerManager:
         loop_count: 循环次数，0表示无限循环
         """
         self._current_token = token
+        self._on_delay = on_delay
+        self._off_delay = off_delay
+        self._max_loops = loop_count if loop_count > 0 else 0
+        self._loop_count = 0
         
         # 检查是否有有效任务
         if on_delay <= 0 and off_delay <= 0:
@@ -168,97 +180,77 @@ class SchedulerManager:
         if isinstance(status, dict) and 'error' in status:
             return {'success': False, 'error': f'无法获取状态: {status["error"]}'}
         
+        self._is_on = is_on
+        
         # 清除旧任务
         self._clear_jobs()
         self._enabled = True
-        self._loop_count = 0
-        self._max_loops = loop_count if loop_count > 0 else 0
-        self._task_counter = 0
         
-        # 构建任务列表
-        tasks = []
-        job_id_prefix = f"job_{int(time.time())}"
-        
+        # 根据当前状态决定第一个动作
         if is_on:
-            # 当前开启 → 先执行关闭任务
+            # 当前开启 → 先关闭
             if off_delay > 0:
-                self._add_job(f"{job_id_prefix}_off", '关闭', off_delay, False)
-                tasks.append(f"每{off_delay}分钟关闭")
-            if on_delay > 0:
-                self._add_job(f"{job_id_prefix}_on", '开启', on_delay, True)
-                tasks.append(f"每{on_delay}分钟开启")
+                self._schedule_next('off', off_delay)
+            elif on_delay > 0:
+                self._schedule_next('on', on_delay)
         else:
-            # 当前关闭 → 先执行开启任务
+            # 当前关闭 → 先开启
             if on_delay > 0:
-                self._add_job(f"{job_id_prefix}_on", '开启', on_delay, True)
-                tasks.append(f"每{on_delay}分钟开启")
-            if off_delay > 0:
-                self._add_job(f"{job_id_prefix}_off", '关闭', off_delay, False)
-                tasks.append(f"每{off_delay}分钟关闭")
+                self._schedule_next('on', on_delay)
+            elif off_delay > 0:
+                self._schedule_next('off', off_delay)
         
         # 启动调度器线程
         self._start_worker()
         
         loop_text = f"循环{loop_count}次" if loop_count > 0 else "无限循环"
-        task_desc = ', '.join(tasks)
-        self._log(f"定时控制已启动: {task_desc} ({loop_text}) (当前状态: {'开启' if is_on else '关闭'})")
+        self._log(f"定时控制已启动: 开{on_delay}分/关{off_delay}分 ({loop_text}) (当前状态: {'开启' if is_on else '关闭'})")
         
         return {
             'success': True,
-            'message': f"定时控制已启动: {task_desc}",
-            'tasks': tasks,
+            'message': f"定时控制已启动: 开{on_delay}分/关{off_delay}分",
             'enabled': True,
             'current_status': '开启' if is_on else '关闭',
             'loop_count': loop_count,
             'loop_text': loop_text
         }
     
-    def _add_job(self, job_id: str, job_type: str, delay: int, action: bool):
-        """添加单个定时任务 - 使用 schedule 内置重复机制"""
-        
-        def task():
-            if not self._enabled or not self._current_token:
-                return
-            
-            # 检查循环次数
-            with self._execution_lock:
-                if self._max_loops > 0 and self._loop_count >= self._max_loops:
-                    self._log(f"⏹️ 已达到设定循环次数 ({self._max_loops}次)，自动停止定时", 'warning')
-                    self.stop()
-                    return
-                
-                # 执行任务
-                self._execute_task(action, delay, job_type)
-                
-                # 增加循环计数（每次任务执行算一次循环）
-                self._loop_count += 1
-                
-                # 检查是否达到最大循环次数
-                if self._max_loops > 0 and self._loop_count >= self._max_loops:
-                    self._log(f"⏹️ 已完成 {self._max_loops} 次循环，自动停止定时", 'warning')
-                    self.stop()
-        
-        # schedule.every(delay).minutes 会自动重复执行
-        schedule.every(delay).minutes.do(task).tag(job_id)
-        self._jobs[job_id] = {
-            'type': job_type,
-            'delay': delay,
-            'action': action,
-            'tag': job_id
-        }
-        self._log(f"📌 已调度任务: {job_type}空调 (每{delay}分钟)", 'info')
-    
-    def _execute_task(self, action: bool, delay: int, job_type: str):
-        """执行定时任务"""
+    def _schedule_next(self, action: str, delay: int):
+        """调度下一个动作（顺序执行）"""
         if not self._enabled:
-            self._log("⏸️ 定时控制已暂停", 'warning')
             return
         
-        if not self._current_token:
-            self._log("❌ 没有有效的Token", 'error')
+        # 检查循环次数
+        if self._max_loops > 0 and self._loop_count >= self._max_loops:
+            self._log(f"⏹️ 已达到设定循环次数 ({self._max_loops}次)，执行关闭后停止", 'warning')
+            self._stop_with_close()
             return
         
-        action_str = "开启" if action else "关闭"
+        self._current_action = action
+        self._is_waiting = True
+        action_text = "开启" if action == 'on' else "关闭"
+        
+        # 取消之前的调度
+        if self._scheduled_job:
+            schedule.cancel_job(self._scheduled_job)
+            self._scheduled_job = None
+        
+        # 调度新任务
+        def task():
+            self._is_waiting = False
+            self._execute_action(action)
+        
+        # 使用 schedule 的延迟调度
+        self._scheduled_job = schedule.every(delay).minutes.do(task).tag('scheduled_action')
+        self._log(f"⏰ 已调度: {action_text}空调 ({delay}分钟后执行)", 'info')
+    
+    def _execute_action(self, action: str):
+        """执行单个动作"""
+        if not self._enabled:
+            return
+        
+        action_text = "开启" if action == 'on' else "关闭"
+        target = 1 if action == 'on' else 0
         
         try:
             client = AirConClient(self._current_token)
@@ -266,32 +258,104 @@ class SchedulerManager:
             
             if isinstance(status, dict) and 'error' in status:
                 self._log(f"❌ 获取状态失败: {status['error']}", 'error')
+                self._schedule_retry(action)
                 return
             
             is_on = status.get('DisconnectRelay', False)
+            self._is_on = is_on
             
             # 如果已经是目标状态，跳过
-            if (action and is_on) or (not action and not is_on):
-                self._log(f"⏸️ 空调已经是{action_str}状态，跳过", 'info')
+            if (action == 'on' and is_on) or (action == 'off' and not is_on):
+                self._log(f"⏸️ 空调已经是{action_text}状态，跳过", 'info')
+                self._advance_cycle(action)
                 return
             
             # 执行操作
-            target = 1 if action else 0
             result = client.set_status(target)
             
             if result.get('success'):
-                self._log(f"✅ 定时任务执行成功: {action_str}空调 (延迟{delay}分钟)", 'success')
+                delay = self._on_delay if action == 'on' else self._off_delay
+                self._log(f"✅ 定时任务执行成功: {action_text}空调 (延迟{delay}分钟)", 'success')
+                self._is_on = (action == 'on')
+                self._advance_cycle(action)
             else:
                 self._log(f"❌ 定时任务执行失败: {result.get('error')}", 'error')
+                self._schedule_retry(action)
                 
         except Exception as e:
             self._log(f"❌ 任务执行异常: {e}", 'error')
+            self._schedule_retry(action)
+    
+    def _advance_cycle(self, action: str):
+        """推进循环"""
+        # 每次成功执行一个操作，算半次循环
+        # 完整的一次循环 = 开启 + 关闭
+        if action == 'on':
+            # 开启了，接下来应该关闭
+            if self._off_delay > 0:
+                self._schedule_next('off', self._off_delay)
+            else:
+                # 没有关闭延迟，直接完成一次循环
+                self._loop_count += 1
+                if self._max_loops > 0 and self._loop_count >= self._max_loops:
+                    self._stop_with_close()
+                elif self._on_delay > 0:
+                    self._schedule_next('on', self._on_delay)
+                else:
+                    self.stop()
+        else:  # action == 'off'
+            # 关闭了，完成一次完整循环
+            self._loop_count += 1
+            
+            # 检查是否达到最大循环次数
+            if self._max_loops > 0 and self._loop_count >= self._max_loops:
+                self._stop_with_close()
+                return
+            
+            # 继续下一轮
+            if self._on_delay > 0:
+                self._schedule_next('on', self._on_delay)
+            else:
+                # 没有开启延迟，直接停止
+                self.stop()
+    
+    def _stop_with_close(self):
+        """停止定时并确保空调关闭"""
+        self._log("🔄 循环结束，正在关闭空调...", 'warning')
+        
+        # 先执行关闭操作
+        try:
+            client = AirConClient(self._current_token)
+            status = client.get_status()
+            
+            if isinstance(status, dict) and 'error' not in status:
+                is_on = status.get('DisconnectRelay', False)
+                if is_on:
+                    result = client.set_status(0)
+                    if result.get('success'):
+                        self._log("✅ 已关闭空调", 'success')
+                    else:
+                        self._log(f"❌ 关闭空调失败: {result.get('error')}", 'error')
+        except Exception as e:
+            self._log(f"❌ 关闭空调异常: {e}", 'error')
+        
+        # 停止定时
+        self.stop()
+    
+    def _schedule_retry(self, action: str):
+        """失败后重试（1分钟后）"""
+        self._log(f"🔄 1分钟后重试: {action}", 'warning')
+        schedule.every(1).minutes.do(lambda: self._execute_action(action)).tag('retry')
     
     def _clear_jobs(self):
         """清除所有任务"""
-        for job_id in list(self._jobs.keys()):
-            schedule.clear(job_id)
+        if self._scheduled_job:
+            schedule.cancel_job(self._scheduled_job)
+            self._scheduled_job = None
+        schedule.clear('scheduled_action')
+        schedule.clear('retry')
         self._jobs.clear()
+        self._is_waiting = False
     
     def stop(self) -> Dict[str, Any]:
         """停止所有定时任务"""
@@ -299,22 +363,22 @@ class SchedulerManager:
         self._enabled = False
         self._loop_count = 0
         self._max_loops = 0
+        self._is_waiting = False
+        self._current_action = None
         self._log("定时控制已停止", 'info')
         return {'success': True, 'message': '定时控制已停止', 'enabled': self._enabled}
     
     def get_status(self) -> Dict[str, Any]:
         """获取调度器状态"""
         jobs = []
-        for key, info in self._jobs.items():
-            job_list = schedule.get_jobs(key)
-            if job_list:
-                job = job_list[0]
-                jobs.append({
-                    'id': key,
-                    'type': info['type'],
-                    'delay': info['delay'],
-                    'next_run': str(job.next_run) if job.next_run else 'N/A'
-                })
+        
+        if self._scheduled_job:
+            jobs.append({
+                'id': 'scheduled_action',
+                'type': '开启' if self._current_action == 'on' else '关闭',
+                'delay': self._on_delay if self._current_action == 'on' else self._off_delay,
+                'next_run': str(self._scheduled_job.next_run) if self._scheduled_job.next_run else 'N/A'
+            })
         
         # 计算剩余循环次数
         remaining = self._max_loops - self._loop_count if self._max_loops > 0 else 0
@@ -326,7 +390,9 @@ class SchedulerManager:
             'loop_count': self._loop_count,
             'max_loops': self._max_loops,
             'remaining_loops': remaining if remaining > 0 else 0,
-            'is_looping': self._max_loops > 0
+            'is_looping': self._max_loops > 0,
+            'is_waiting': self._is_waiting,
+            'current_action': self._current_action
         }
     
     def _start_worker(self):
