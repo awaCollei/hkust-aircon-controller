@@ -2,7 +2,9 @@
 import threading
 import time
 import logging
-from datetime import datetime
+import sys
+import os
+from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, Tuple
 
 from flask import Flask, render_template, request, jsonify
@@ -116,7 +118,10 @@ class SchedulerManager:
         self._jobs: Dict[str, Dict] = {}
         self._current_token: Optional[str] = None
         self._log_callback = None
-        self._pending_actions = []  # 待执行动作队列
+        self._loop_count = 0  # 当前循环次数
+        self._max_loops = 0   # 最大循环次数
+        self._task_counter = 0  # 任务计数器
+        self._execution_lock = threading.Lock()  # 执行锁
         
         logger.info("调度器管理器初始化完成")
     
@@ -145,11 +150,12 @@ class SchedulerManager:
         is_on = status.get('DisconnectRelay', False)
         return is_on, status
     
-    def start(self, token: str, on_delay: int, off_delay: int) -> Dict[str, Any]:
+    def start(self, token: str, on_delay: int, off_delay: int, loop_count: int = 0) -> Dict[str, Any]:
         """
         启动定时任务
         on_delay: 关闭后多久开启（分钟），0表示不开启
         off_delay: 开启后多久关闭（分钟），0表示不关闭
+        loop_count: 循环次数，0表示无限循环
         """
         self._current_token = token
         
@@ -163,61 +169,76 @@ class SchedulerManager:
             return {'success': False, 'error': f'无法获取状态: {status["error"]}'}
         
         # 清除旧任务
-        self.stop()
+        self._clear_jobs()
         self._enabled = True
+        self._loop_count = 0
+        self._max_loops = loop_count if loop_count > 0 else 0
+        self._task_counter = 0
         
         # 构建任务列表
         tasks = []
+        job_id_prefix = f"job_{int(time.time())}"
         
         if is_on:
             # 当前开启 → 先执行关闭任务
             if off_delay > 0:
-                self._add_job('off', '关闭', off_delay, False)
+                self._add_job(f"{job_id_prefix}_off", '关闭', off_delay, False)
                 tasks.append(f"每{off_delay}分钟关闭")
             if on_delay > 0:
-                self._add_job('on', '开启', on_delay, True)
+                self._add_job(f"{job_id_prefix}_on", '开启', on_delay, True)
                 tasks.append(f"每{on_delay}分钟开启")
         else:
             # 当前关闭 → 先执行开启任务
             if on_delay > 0:
-                self._add_job('on', '开启', on_delay, True)
+                self._add_job(f"{job_id_prefix}_on", '开启', on_delay, True)
                 tasks.append(f"每{on_delay}分钟开启")
             if off_delay > 0:
-                self._add_job('off', '关闭', off_delay, False)
+                self._add_job(f"{job_id_prefix}_off", '关闭', off_delay, False)
                 tasks.append(f"每{off_delay}分钟关闭")
         
         # 启动调度器线程
         self._start_worker()
         
+        loop_text = f"循环{loop_count}次" if loop_count > 0 else "无限循环"
         task_desc = ', '.join(tasks)
-        self._log(f"定时控制已启动: {task_desc} (当前状态: {'开启' if is_on else '关闭'})")
+        self._log(f"定时控制已启动: {task_desc} ({loop_text}) (当前状态: {'开启' if is_on else '关闭'})")
         
         return {
             'success': True,
             'message': f"定时控制已启动: {task_desc}",
             'tasks': tasks,
             'enabled': True,
-            'current_status': '开启' if is_on else '关闭'
+            'current_status': '开启' if is_on else '关闭',
+            'loop_count': loop_count,
+            'loop_text': loop_text
         }
     
     def _add_job(self, job_id: str, job_type: str, delay: int, action: bool):
-        """添加单个定时任务 - 使用递归调度确保重复执行"""
+        """添加单个定时任务 - 使用 schedule 内置重复机制"""
         
         def task():
             if not self._enabled or not self._current_token:
                 return
             
-            # 执行任务
-            self._execute_task(action, delay, job_type)
-            
-            # 重新调度自己（如果仍然启用）
-            if self._enabled:
-                schedule.every(delay).minutes.do(task).tag(job_id)
-                # 更新任务记录
-                if job_id in self._jobs:
-                    self._jobs[job_id]['tag'] = job_id
+            # 检查循环次数
+            with self._execution_lock:
+                if self._max_loops > 0 and self._loop_count >= self._max_loops:
+                    self._log(f"⏹️ 已达到设定循环次数 ({self._max_loops}次)，自动停止定时", 'warning')
+                    self.stop()
+                    return
+                
+                # 执行任务
+                self._execute_task(action, delay, job_type)
+                
+                # 增加循环计数（每次任务执行算一次循环）
+                self._loop_count += 1
+                
+                # 检查是否达到最大循环次数
+                if self._max_loops > 0 and self._loop_count >= self._max_loops:
+                    self._log(f"⏹️ 已完成 {self._max_loops} 次循环，自动停止定时", 'warning')
+                    self.stop()
         
-        # 首次调度
+        # schedule.every(delay).minutes 会自动重复执行
         schedule.every(delay).minutes.do(task).tag(job_id)
         self._jobs[job_id] = {
             'type': job_type,
@@ -225,6 +246,7 @@ class SchedulerManager:
             'action': action,
             'tag': job_id
         }
+        self._log(f"📌 已调度任务: {job_type}空调 (每{delay}分钟)", 'info')
     
     def _execute_task(self, action: bool, delay: int, job_type: str):
         """执行定时任务"""
@@ -265,21 +287,25 @@ class SchedulerManager:
         except Exception as e:
             self._log(f"❌ 任务执行异常: {e}", 'error')
     
-    def stop(self) -> Dict[str, Any]:
-        """停止所有定时任务"""
-        # 使用 tag 清除所有任务
+    def _clear_jobs(self):
+        """清除所有任务"""
         for job_id in list(self._jobs.keys()):
             schedule.clear(job_id)
         self._jobs.clear()
+    
+    def stop(self) -> Dict[str, Any]:
+        """停止所有定时任务"""
+        self._clear_jobs()
         self._enabled = False
+        self._loop_count = 0
+        self._max_loops = 0
         self._log("定时控制已停止", 'info')
-        return {'success': True, 'message': '定时控制已停止', 'enabled': False}
+        return {'success': True, 'message': '定时控制已停止', 'enabled': self._enabled}
     
     def get_status(self) -> Dict[str, Any]:
         """获取调度器状态"""
         jobs = []
         for key, info in self._jobs.items():
-            # 从 schedule 中获取任务
             job_list = schedule.get_jobs(key)
             if job_list:
                 job = job_list[0]
@@ -289,19 +315,18 @@ class SchedulerManager:
                     'delay': info['delay'],
                     'next_run': str(job.next_run) if job.next_run else 'N/A'
                 })
-            else:
-                # 任务可能丢失，但记录还在
-                jobs.append({
-                    'id': key,
-                    'type': info['type'],
-                    'delay': info['delay'],
-                    'next_run': '已过期（将被重新调度）'
-                })
+        
+        # 计算剩余循环次数
+        remaining = self._max_loops - self._loop_count if self._max_loops > 0 else 0
         
         return {
             'running': self._running,
             'enabled': self._enabled and len(jobs) > 0,
-            'jobs': jobs
+            'jobs': jobs,
+            'loop_count': self._loop_count,
+            'max_loops': self._max_loops,
+            'remaining_loops': remaining if remaining > 0 else 0,
+            'is_looping': self._max_loops > 0
         }
     
     def _start_worker(self):
@@ -389,6 +414,69 @@ def format_status(status: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def calculate_end_time(on_delay: int, off_delay: int, loop_count: int) -> Dict[str, Any]:
+    """
+    计算结束时间
+    返回：总分钟数、天、时、分、结束时间描述
+    """
+    if loop_count <= 0 or (on_delay <= 0 and off_delay <= 0):
+        return {
+            'total_minutes': 0,
+            'days': 0,
+            'hours': 0,
+            'minutes': 0,
+            'end_time_str': '无限循环'
+        }
+    
+    # 每次循环的时间 = on_delay + off_delay
+    cycle_minutes = on_delay + off_delay
+    if cycle_minutes == 0:
+        return {
+            'total_minutes': 0,
+            'days': 0,
+            'hours': 0,
+            'minutes': 0,
+            'end_time_str': '无效配置'
+        }
+    
+    # 总分钟数
+    total_minutes = cycle_minutes * loop_count
+    
+    # 转换为天、时、分
+    days = total_minutes // 1440
+    hours = (total_minutes % 1440) // 60
+    minutes = total_minutes % 60
+    
+    # 计算结束时间
+    now = datetime.now()
+    end_time = now + timedelta(minutes=total_minutes)
+    
+    # 判断是今天、明天还是后天
+    today = now.date()
+    end_date = end_time.date()
+    day_diff = (end_date - today).days
+    
+    if day_diff == 0:
+        day_desc = "今天"
+    elif day_diff == 1:
+        day_desc = "明天"
+    elif day_diff == 2:
+        day_desc = "后天"
+    else:
+        day_desc = f"{day_diff}天后"
+    
+    end_time_str = f"{day_desc} {end_time.strftime('%H:%M')}"
+    
+    return {
+        'total_minutes': total_minutes,
+        'days': days,
+        'hours': hours,
+        'minutes': minutes,
+        'end_time_str': end_time_str,
+        'end_time': end_time.strftime('%Y-%m-%d %H:%M:%S')
+    }
+
+
 # ============================================
 # Flask路由
 # ============================================
@@ -448,11 +536,12 @@ def set_schedule():
     token = data.get('token')
     on_delay = int(data.get('on_delay', 0) or 0)
     off_delay = int(data.get('off_delay', 0) or 0)
+    loop_count = int(data.get('loop_count', 0) or 0)
     
     if not token:
         return jsonify({'error': 'Token不能为空'}), 400
     
-    result = scheduler.start(token, on_delay, off_delay)
+    result = scheduler.start(token, on_delay, off_delay, loop_count)
     
     if result.get('success'):
         return jsonify(result)
@@ -473,6 +562,18 @@ def get_schedule_status():
     return jsonify(scheduler.get_status())
 
 
+@app.route('/api/schedule/calculate', methods=['POST'])
+def calculate_schedule():
+    """计算定时结束时间"""
+    data = request.json
+    on_delay = int(data.get('on_delay', 0) or 0)
+    off_delay = int(data.get('off_delay', 0) or 0)
+    loop_count = int(data.get('loop_count', 0) or 0)
+    
+    result = calculate_end_time(on_delay, off_delay, loop_count)
+    return jsonify(result)
+
+
 @app.route('/api/logs', methods=['GET'])
 def get_logs():
     """获取日志"""
@@ -483,4 +584,4 @@ def get_logs():
 # 启动
 # ============================================
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)
+    app.run(host='0.0.0.0', port=10721, debug=True, use_reloader=False)

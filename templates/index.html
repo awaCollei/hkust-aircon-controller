@@ -223,11 +223,11 @@
             color: white;
         }
         
-        /* 定时卡片 - 简化版 */
+        /* 定时卡片 */
         .schedule-row {
             display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 20px;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 15px;
             margin-bottom: 15px;
         }
         
@@ -245,6 +245,10 @@
         
         .schedule-card.off-card {
             border-left-color: #fc8181;
+        }
+        
+        .schedule-card.loop-card {
+            border-left-color: #667eea;
         }
         
         .schedule-card .card-icon {
@@ -294,7 +298,6 @@
             flex-shrink: 0;
         }
         
-        /* 开启卡片颜色 */
         .schedule-card.on-card .card-input-group input {
             border-color: #48bb78;
         }
@@ -302,7 +305,6 @@
             border-color: #38a169;
         }
         
-        /* 关闭卡片颜色 */
         .schedule-card.off-card .card-input-group input {
             border-color: #fc8181;
         }
@@ -310,58 +312,11 @@
             border-color: #f56565;
         }
         
-        .checkbox-group {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            margin: 10px 0;
-            padding: 10px;
-            background: white;
-            border-radius: 8px;
+        .schedule-card.loop-card .card-input-group input {
+            border-color: #667eea;
         }
-        
-        .checkbox-group input[type="checkbox"] {
-            width: 20px;
-            height: 20px;
-            cursor: pointer;
-        }
-        
-        .checkbox-group label {
-            font-size: 14px;
-            color: #555;
-            cursor: pointer;
-        }
-        
-        .log-section {
-            max-height: 200px;
-            overflow-y: auto;
-            background: #1a202c;
-            color: #e2e8f0;
-            padding: 15px;
-            border-radius: 8px;
-            font-family: 'Courier New', monospace;
-            font-size: 12px;
-            line-height: 1.6;
-        }
-        
-        .log-entry {
-            padding: 2px 0;
-        }
-        
-        .log-entry.success {
-            color: #48bb78;
-        }
-        
-        .log-entry.error {
-            color: #fc8181;
-        }
-        
-        .log-entry.info {
-            color: #63b3ed;
-        }
-        
-        .log-entry.warning {
-            color: #ed8936;
+        .schedule-card.loop-card .card-input-group input:focus {
+            border-color: #5a67d8;
         }
         
         .button-group {
@@ -468,7 +423,6 @@
             color: #742a2a;
         }
         
-        /* 当前状态指示器 */
         .status-indicator {
             display: inline-block;
             padding: 4px 12px;
@@ -484,6 +438,58 @@
         .status-indicator.off {
             background: #fed7d7;
             color: #742a2a;
+        }
+        
+        .log-section {
+            max-height: 200px;
+            overflow-y: auto;
+            background: #1a202c;
+            color: #e2e8f0;
+            padding: 15px;
+            border-radius: 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            line-height: 1.6;
+        }
+        
+        .log-entry {
+            padding: 2px 0;
+        }
+        
+        .log-entry.success {
+            color: #48bb78;
+        }
+        
+        .log-entry.error {
+            color: #fc8181;
+        }
+        
+        .log-entry.info {
+            color: #63b3ed;
+        }
+        
+        .log-entry.warning {
+            color: #ed8936;
+        }
+        
+        .loop-info {
+            background: white;
+            padding: 12px 16px;
+            border-radius: 8px;
+            margin: 10px 0;
+            font-size: 14px;
+            border: 2px solid #667eea;
+            background: #f0f4ff;
+            display: none;
+        }
+        
+        .loop-info.show {
+            display: block;
+        }
+        
+        .loop-info .highlight {
+            color: #667eea;
+            font-weight: 700;
         }
         
         @media (max-width: 600px) {
@@ -570,7 +576,7 @@
             </div>
         </div>
         
-        <!-- 定时设置 - 简化版 -->
+        <!-- 定时设置 -->
         <div class="section">
             <div class="section-title">⏰ 循环定时</div>
             
@@ -579,7 +585,7 @@
                 <div class="schedule-card on-card">
                     <span class="card-icon">🟢</span>
                     <div class="card-input-group">
-                        <input type="number" id="onDelay" placeholder="0" min="0" value="30">
+                        <input type="number" id="onDelay" placeholder="0" min="0" value="30" onchange="calculateEndTime()" oninput="calculateEndTime()">
                         <span class="unit">分钟后</span>
                         <span class="action-text">开启</span>
                     </div>
@@ -589,18 +595,34 @@
                 <div class="schedule-card off-card">
                     <span class="card-icon">🔴</span>
                     <div class="card-input-group">
-                        <input type="number" id="offDelay" placeholder="0" min="0" value="30">
+                        <input type="number" id="offDelay" placeholder="0" min="0" value="30" onchange="calculateEndTime()" oninput="calculateEndTime()">
                         <span class="unit">分钟后</span>
                         <span class="action-text">关闭</span>
                     </div>
                 </div>
+                
+                <!-- 循环次数卡片 -->
+                <div class="schedule-card loop-card">
+                    <span class="card-icon">🔄</span>
+                    <div class="card-input-group">
+                        <input type="number" id="loopCount" placeholder="0" min="0" value="5" onchange="calculateEndTime()" oninput="calculateEndTime()">
+                        <span class="unit">次</span>
+                        <span class="action-text">循环</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 循环信息显示 -->
+            <div id="loopInfo" class="loop-info">
+                📅 <span id="loopInfoText">总计 0 分钟</span>
             </div>
             
             <div class="info-box">
-                💡 <br>
-                设置两个时间后点击「启动定时」，空调会在开启和关闭之间循环。<br>
-                如果只想执行单次定时，把另一个时间设为 <code>0</code> 即可。<br>
-                启动时会根据当前状态自动选择先开启还是先关闭。<br>
+                💡 <strong>循环定时说明：</strong><br>
+                • 设置「开启间隔」和「关闭间隔」，空调会在两个状态间循环<br>
+                • 「循环次数」设置总共循环多少次（0 表示无限循环）<br>
+                • 启动时会根据当前状态自动选择先执行哪个操作<br>
+                • 循环完成后自动停止定时（不会退出程序）
             </div>
             
             <div class="button-group">
@@ -625,7 +647,8 @@
     <script>
         let currentToken = '';
         let timerRunning = false;
-        let currentStatus = null;  // 存储当前状态
+        let currentStatus = null;
+        let statusUpdateInterval = null;
         
         function showAlert(message, type = 'success') {
             const alert = document.getElementById('alertMessage');
@@ -647,6 +670,48 @@
             
             while (container.children.length > 100) {
                 container.removeChild(container.firstChild);
+            }
+        }
+        
+        async function calculateEndTime() {
+            const onDelay = parseInt(document.getElementById('onDelay').value) || 0;
+            const offDelay = parseInt(document.getElementById('offDelay').value) || 0;
+            const loopCount = parseInt(document.getElementById('loopCount').value) || 0;
+            
+            const loopInfo = document.getElementById('loopInfo');
+            const loopInfoText = document.getElementById('loopInfoText');
+            
+            if (loopCount <= 0 || (onDelay <= 0 && offDelay <= 0)) {
+                loopInfo.classList.remove('show');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/schedule/calculate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        on_delay: onDelay,
+                        off_delay: offDelay,
+                        loop_count: loopCount
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.total_minutes > 0) {
+                    let parts = [];
+                    if (data.days > 0) parts.push(`${data.days}天`);
+                    if (data.hours > 0) parts.push(`${data.hours}小时`);
+                    if (data.minutes > 0) parts.push(`${data.minutes}分钟`);
+                    
+                    loopInfoText.innerHTML = `总计 <span class="highlight">${parts.join('')}</span>，直至 <span class="highlight">${data.end_time_str}</span>`;
+                    loopInfo.classList.add('show');
+                } else {
+                    loopInfo.classList.remove('show');
+                }
+            } catch (error) {
+                console.error('计算失败:', error);
             }
         }
         
@@ -697,7 +762,6 @@
                 showAlert('状态更新成功', 'success');
                 addLog(`✅ 获取状态成功: ${data.device_name} - ${data.status_text}`, 'success');
                 
-                // 同步定时状态
                 await syncScheduleStatus();
                 
             } catch (error) {
@@ -755,16 +819,17 @@
         async function startTimer() {
             const onDelay = parseInt(document.getElementById('onDelay').value) || 0;
             const offDelay = parseInt(document.getElementById('offDelay').value) || 0;
+            const loopCount = parseInt(document.getElementById('loopCount').value) || 0;
             
             if (onDelay <= 0 && offDelay <= 0) {
                 showAlert('请设置至少一个有效的时间', 'error');
                 return;
             }
             
-            // 显示将要执行的操作
-            let actionDesc = [];
-            if (onDelay > 0) actionDesc.push(`每${onDelay}分钟开启`);
-            if (offDelay > 0) actionDesc.push(`每${offDelay}分钟关闭`);
+            if (loopCount < 0) {
+                showAlert('循环次数不能为负数', 'error');
+                return;
+            }
             
             try {
                 const response = await fetch('/api/schedule', {
@@ -773,7 +838,8 @@
                     body: JSON.stringify({
                         token: currentToken,
                         on_delay: onDelay,
-                        off_delay: offDelay
+                        off_delay: offDelay,
+                        loop_count: loopCount
                     })
                 });
                 
@@ -789,19 +855,20 @@
                 updateTimerButton();
                 
                 if (data.enabled) {
-                    // 显示当前状态和将执行的动作
                     const statusText = currentStatus ? (currentStatus.is_on ? '开启' : '关闭') : '未知';
                     const firstAction = currentStatus && currentStatus.is_on ? 
                         (offDelay > 0 ? '先关闭' : '等待开启') : 
                         (onDelay > 0 ? '先开启' : '等待关闭');
                     
+                    const loopText = loopCount > 0 ? `循环${loopCount}次` : '无限循环';
+                    
                     showAlert(data.message, 'success');
-                    addLog(`✅ ${data.message} (当前状态: ${statusText}, ${firstAction})`, 'success');
+                    addLog(`✅ ${data.message} (当前状态: ${statusText}, ${firstAction}, ${loopText})`, 'success');
                     
                     document.getElementById('scheduleStatus').className = 'timer-display running';
                     document.getElementById('scheduleStatus').innerHTML = 
                         `▶️ 定时运行中 &nbsp;|&nbsp; 当前状态: <span class="status-indicator ${currentStatus && currentStatus.is_on ? 'on' : 'off'}">${statusText}</span><br>` +
-                        `<small>${data.message} → ${firstAction}</small>`;
+                        `<small>${data.message} → ${firstAction} (${loopText})</small>`;
                 } else {
                     document.getElementById('scheduleStatus').className = 'timer-display stopped';
                     document.getElementById('scheduleStatus').textContent = '⏸️ 定时已停止';
@@ -846,27 +913,30 @@
             }
         }
         
-        // 新增：同步调度器状态（不改变UI按钮状态）
         async function syncScheduleStatus() {
             try {
                 const response = await fetch('/api/schedule/status');
                 const data = await response.json();
                 
-                // 更新内部状态，但不触发按钮样式变化（除非状态真的变了）
                 const wasRunning = timerRunning;
                 timerRunning = data.enabled;
                 
-                // 如果状态变化了，更新UI
                 if (wasRunning !== timerRunning) {
                     updateTimerButton();
                 }
                 
-                // 更新状态显示
                 const statusDiv = document.getElementById('scheduleStatus');
                 if (data.enabled && data.jobs.length > 0) {
                     statusDiv.className = 'timer-display running';
                     const statusText = currentStatus ? (currentStatus.is_on ? '开启' : '关闭') : '未知';
                     let html = `▶️ 定时运行中 &nbsp;|&nbsp; 当前状态: <span class="status-indicator ${currentStatus && currentStatus.is_on ? 'on' : 'off'}">${statusText}</span><br>`;
+                    
+                    if (data.is_looping && data.max_loops > 0) {
+                        html += `<small>🔄 循环 ${data.max_loops} 次，已执行 ${data.loop_count} 次，剩余 ${data.remaining_loops} 次</small><br>`;
+                    } else if (data.is_looping) {
+                        html += `<small>🔄 无限循环中，已执行 ${data.loop_count} 次</small><br>`;
+                    }
+                    
                     data.jobs.forEach(job => {
                         const icon = job.type === '开启' ? '🟢' : '🔴';
                         const nextRun = job.next_run && job.next_run !== 'N/A' ? job.next_run : '等待调度...';
@@ -884,29 +954,30 @@
             }
         }
         
-        // 初始化 - 自动连接
+        // 初始化
         document.addEventListener('DOMContentLoaded', function() {
             const savedToken = localStorage.getItem('aircon_token');
             if (savedToken) {
                 document.getElementById('tokenInput').value = savedToken;
-                // 先获取状态，再获取定时状态
                 getStatus().then(() => {
-                    // 同步定时状态
                     syncScheduleStatus();
+                    calculateEndTime();
                 });
             }
             
-            // 定时刷新（每60秒）
-            setInterval(() => {
+            // 每60秒刷新一次
+            if (statusUpdateInterval) {
+                clearInterval(statusUpdateInterval);
+            }
+            statusUpdateInterval = setInterval(() => {
                 if (currentToken) {
                     getStatus();
-                    // 同步定时状态（但不要覆盖UI状态）
                     syncScheduleStatus();
                 }
             }, 60000);
         });
         
-        // 保存token到localStorage
+        // 保存token
         document.getElementById('tokenInput').addEventListener('change', function() {
             if (this.value.trim()) {
                 localStorage.setItem('aircon_token', this.value.trim());
